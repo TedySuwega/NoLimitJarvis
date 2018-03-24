@@ -10,7 +10,8 @@ class MasterActor extends SupervisorTrait with ActorLogging {
   implicit val asyncIOEc = DispatcherManager.asyncIOExecutionContext
 
   override val workerProps: List[NamedProps] = List(
-      "web-server" -> Props[WebServerActor]
+      "web-server" -> Props[WebServerActor],
+      "knowledge-actor" -> Props[KnowledgeProcessingActor]
   )
 
   override def onReceive = {
