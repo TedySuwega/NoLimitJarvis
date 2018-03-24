@@ -19,10 +19,6 @@ class KnowledgeProcessingActor extends Actor with ActorLogging{
         sender() ! resultStates("Oke Selalu Siap saya")
       }
       else if(question.contains("Minta Rekap")){
-        println(
-          s"""
-            |THREADSTATES : ${threadStates}
-          """.stripMargin)
         if(threadStates.isDefinedAt(thread)){
           val result = threadStates(thread).foldLeft[List[String]](List()) {
             (a,b) =>
