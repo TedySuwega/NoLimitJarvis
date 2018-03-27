@@ -36,9 +36,13 @@ case class WebhookBotRouter()(implicit val context: ActorContext) {
             val thread = (rawJson \ "message" \ "thread" \ "name").get.as[String]
 
             val knowledgeActor = context.actorSelection("/user/master/knowledge-actor")
-            implicit val timeout = Timeout(60 seconds)
+            implicit val timeout = Timeout(3 minutes)
             onComplete(knowledgeActor ? askKnowledge(message, thread, sender)){
               case Success(item: resultStates) =>
+                println(
+                  s"""
+                    |RESULT : ${item.result}
+                  """.stripMargin)
                 complete{
                   Json.obj("text" -> item.result)
                 }

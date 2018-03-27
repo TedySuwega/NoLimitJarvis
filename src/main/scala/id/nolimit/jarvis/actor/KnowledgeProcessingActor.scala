@@ -1,8 +1,16 @@
 package id.nolimit.jarvis.actor
 
-import akka.actor.{Actor, ActorLogging}
-import id.nolimit.jarvis.actor.KnowledgeProcessingActor.{askKnowledge, resultStates, states}
+import akka.actor.{Actor, ActorLogging, ActorSystem}
+import akka.http.scaladsl.model.{ContentTypes, HttpEntity, HttpMethods, HttpRequest}
+import com.typesafe.config.ConfigFactory
+import id.nolimit.jarvis.actor.KnowledgeProcessingActor._
 import id.nolimit.jarvis.util.StringUtil
+import play.api.libs.json.Json
+import akka.http.scaladsl.{Http => Client}
+import akka.stream.ActorMaterializer
+import akka.util.ByteString
+import id.nolimit.jarvis.dispatcher.DispatcherManager
+import scala.util.{Failure, Success}
 
 /**
   * Created by nabilfarras on 24/03/18.
@@ -11,9 +19,21 @@ import id.nolimit.jarvis.util.StringUtil
 class KnowledgeProcessingActor extends Actor with ActorLogging{
 
   private var threadStates = Map.empty[String,Map[String,states]]
+  private var botStates = Map.empty[String, thread]
+
+  private val config = ConfigFactory.load()
+  private val chatbotUrl = config.getConfig("chatbot")
 
   override def receive = {
     case askKnowledge(question, thread, senderName) =>
+
+      println(
+        s"""
+          |QUESTION : ${question}
+          |THREAD : ${thread}
+          |SENDERNAME : ${senderName}
+        """.stripMargin)
+
       if(question.contains("Tolong catetin dong")){
         threadStates = threadStates + (thread -> Map(StringUtil.randomString() -> states("Initial")))
         sender() ! resultStates("Oke Selalu Siap saya")
@@ -22,17 +42,132 @@ class KnowledgeProcessingActor extends Actor with ActorLogging{
         if(threadStates.isDefinedAt(thread)){
           val result = threadStates(thread).foldLeft[List[String]](List()) {
             (a,b) =>
-              a :+ b._2.state
+              if(!b._2.state.contains("Initial")){
+                a :+ b._2.state
+              }
+              else{
+                a :+ ""
+              }
           }
-
-          sender() ! resultStates(result.mkString("/n"))
+          sender() ! resultStates(s"Ini rekapnya : ${result.mkString("\n")}")
         }
         else {
           sender() ! resultStates("Bilang dulu dong 'Tolong catetin dong'")
         }
       }
-      else if(question == "Siapa yang paling ganteng di NoLimit ?"){
-        sender() ! resultStates(s"NABIL FARRAS : Pengirim ${senderName}")
+      else if(question.contains("/care-chatbot mau tanya")) {
+        if(!threadStates.isDefinedAt(thread)){
+          val threadSender = thread
+          val requester  = sender()
+          implicit val materializer = ActorMaterializer()
+          implicit val asyncIOEc = DispatcherManager.asyncIOExecutionContext
+          implicit val system = ActorSystem()
+          val obj = Json.obj(
+            "nama" -> senderName,
+            "idbot" -> "1"
+          )
+          val entity = HttpEntity(ContentTypes.`application/json`, obj.toString())
+          val request = HttpRequest(
+            uri = chatbotUrl.getString("urlSession"),
+            entity = entity,
+            method = HttpMethods.POST)
+
+          Client()
+            .singleRequest(request)
+            .flatMap{ response =>
+              val statusCode = response.status
+              if (statusCode.isFailure()) {
+                throw new Exception(statusCode.reason())
+              } else
+              {
+                response
+                  .entity
+                  .dataBytes
+                  .runFold(ByteString(""))(_++_)
+                  .map(_.utf8String)
+              }
+            }.onComplete{
+            case Success(item) =>
+              val result = Json.parse(item)
+              println(s"item : ${Json.parse(item)}")
+              println(s"TOKEN : ${(result \ "token").as[String]}")
+              println(s"OUTPUT : ${(result \ "output").as[String]}")
+              val token = (result \ "token").as[String]
+              val output = (result \ "output").as[String]
+              botStates = botStates + (token -> new thread(senderName, threadSender))
+              requester ! resultStates(output)
+            case Failure(reason) =>
+              println(s"reason ${reason}")
+          }
+        }
+      }
+      else if (question.contains("care-chatbot")){
+        println(s"botStates : ${botStates}")
+
+        val requester  = sender()
+        val definedBot = botStates.find{
+          item => item._2.name == senderName && item._2.threadType == thread
+        }
+        definedBot match {
+          case Some(item) =>
+            implicit val materializer = ActorMaterializer()
+            implicit val asyncIOEc = DispatcherManager.asyncIOExecutionContext
+            implicit val system = ActorSystem()
+            println(s"test : ${question.replace("/care-chatbot","")}")
+            val obj = Json.obj(
+              "input" -> question.replace("/care-chatbot",""),
+              "token" -> item._1
+            )
+            val entity = HttpEntity(ContentTypes.`application/json`, obj.toString())
+            val request = HttpRequest(
+              uri = chatbotUrl.getString("urlChat"),
+              entity = entity,
+              method = HttpMethods.POST)
+            Client()
+              .singleRequest(request)
+              .flatMap{ response =>
+                val statusCode = response.status
+                if (statusCode.isFailure()) {
+                  throw new Exception(statusCode.reason())
+                } else
+                {
+                  response
+                    .entity
+                    .dataBytes
+                    .runFold(ByteString(""))(_++_)
+                    .map(_.utf8String)
+                }
+              }.onComplete{
+              case Success(item) =>
+                val result = Json.parse(item)
+                val output = (result \ "output").as[String]
+                requester ! resultStates(output)
+              case Failure(reason) =>
+                println(s"reason ${reason}")
+            }
+          case _ =>
+            requester ! resultStates("Kodenya dulu dong /care-chatbot mau tanya")
+        }
+      }
+      else if(question.contains("/help")){
+        val requester = sender()
+        val text =
+          """
+            |1. /care-chatbot mau tanya
+            |2. /care-chatbot
+            |3. Tolong catetin dong
+            |4. Minta Rekap
+          """.stripMargin
+        requester ! resultStates(text)
+      }
+      else if(question.contains("Siapa yang paling ganteng di NoLimit ?")){
+        val text = if(senderName.contains("NABIL")){
+          "NABIL FARRAS"
+        }
+        else{
+          s"NABIL FARRAS - Diakui Oleh ${senderName}"
+        }
+        sender() ! resultStates(text)
       }
       else {
         if(threadStates.isDefinedAt(thread)){
@@ -67,4 +202,8 @@ object KnowledgeProcessingActor {
   case class resultStates(
                          result : String
                          )
+  case class thread(
+                   name : String,
+                   threadType : String
+                   )
 }
