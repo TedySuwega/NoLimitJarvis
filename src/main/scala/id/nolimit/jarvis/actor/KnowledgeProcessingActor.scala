@@ -20,12 +20,12 @@ class KnowledgeProcessingActor extends Actor with ActorLogging{
 
   private var threadStates = Map.empty[String,Map[String,states]]
   private var botStates = Map.empty[String, thread]
-
+  private var dmStates = Map.empty[String, thread]
   private val config = ConfigFactory.load()
   private val chatbotUrl = config.getConfig("chatbot")
 
   override def receive = {
-    case askKnowledge(question, thread, senderName) =>
+    case askKnowledge(question, thread, senderName,typeMessage) =>
 
       println(
         s"""
@@ -34,11 +34,11 @@ class KnowledgeProcessingActor extends Actor with ActorLogging{
           |SENDERNAME : ${senderName}
         """.stripMargin)
 
-      if(question.contains("Tolong catetin dong")){
+      if(question.contains("Tolong catetin dong") && typeMessage == "ROOM"){
         threadStates = threadStates + (thread -> Map(StringUtil.randomString() -> states("Initial")))
         sender() ! resultStates("Oke Selalu Siap saya")
       }
-      else if(question.contains("Minta Rekap")){
+      else if(question.contains("Minta Rekap") && typeMessage == "ROOM"){
         if(threadStates.isDefinedAt(thread)){
           val result = threadStates(thread).foldLeft[List[String]](List()) {
             (a,b) =>
@@ -56,9 +56,56 @@ class KnowledgeProcessingActor extends Actor with ActorLogging{
         }
       }
       else if(question.contains("/care-chatbot mau tanya")) {
-        if(!threadStates.isDefinedAt(thread)){
+        if(typeMessage == "ROOM") {
+          println("ROOM MODE")
+          if (!threadStates.isDefinedAt(thread)) {
+            val threadSender = thread
+            val requester = sender()
+            implicit val materializer = ActorMaterializer()
+            implicit val asyncIOEc = DispatcherManager.asyncIOExecutionContext
+            implicit val system = ActorSystem()
+            val obj = Json.obj(
+              "nama" -> senderName,
+              "idbot" -> "1"
+            )
+            val entity = HttpEntity(ContentTypes.`application/json`, obj.toString())
+            val request = HttpRequest(
+              uri = chatbotUrl.getString("urlSession"),
+              entity = entity,
+              method = HttpMethods.POST)
+
+            Client()
+              .singleRequest(request)
+              .flatMap { response =>
+                val statusCode = response.status
+                if (statusCode.isFailure()) {
+                  throw new Exception(statusCode.reason())
+                } else {
+                  response
+                    .entity
+                    .dataBytes
+                    .runFold(ByteString(""))(_ ++ _)
+                    .map(_.utf8String)
+                }
+              }.onComplete {
+              case Success(item) =>
+                val result = Json.parse(item)
+                println(s"item : ${Json.parse(item)}")
+                println(s"TOKEN : ${(result \ "token").as[String]}")
+                println(s"OUTPUT : ${(result \ "output").as[String]}")
+                val token = (result \ "token").as[String]
+                val output = (result \ "output").as[String]
+                botStates = botStates + (token -> new thread(senderName, threadSender))
+                requester ! resultStates(output)
+              case Failure(reason) =>
+                println(s"reason ${reason}")
+            }
+          }
+        }
+        else if(typeMessage == "DM"){
+          println("DM MODE")
           val threadSender = thread
-          val requester  = sender()
+          val requester = sender()
           implicit val materializer = ActorMaterializer()
           implicit val asyncIOEc = DispatcherManager.asyncIOExecutionContext
           implicit val system = ActorSystem()
@@ -74,19 +121,18 @@ class KnowledgeProcessingActor extends Actor with ActorLogging{
 
           Client()
             .singleRequest(request)
-            .flatMap{ response =>
+            .flatMap { response =>
               val statusCode = response.status
               if (statusCode.isFailure()) {
                 throw new Exception(statusCode.reason())
-              } else
-              {
+              } else {
                 response
                   .entity
                   .dataBytes
-                  .runFold(ByteString(""))(_++_)
+                  .runFold(ByteString(""))(_ ++ _)
                   .map(_.utf8String)
               }
-            }.onComplete{
+            }.onComplete {
             case Success(item) =>
               val result = Json.parse(item)
               println(s"item : ${Json.parse(item)}")
@@ -94,7 +140,7 @@ class KnowledgeProcessingActor extends Actor with ActorLogging{
               println(s"OUTPUT : ${(result \ "output").as[String]}")
               val token = (result \ "token").as[String]
               val output = (result \ "output").as[String]
-              botStates = botStates + (token -> new thread(senderName, threadSender))
+              dmStates = dmStates + (senderName -> new thread(senderName, token))
               requester ! resultStates(output)
             case Failure(reason) =>
               println(s"reason ${reason}")
@@ -102,21 +148,67 @@ class KnowledgeProcessingActor extends Actor with ActorLogging{
         }
       }
       else if (question.contains("care-chatbot")){
-        println(s"botStates : ${botStates}")
-
         val requester  = sender()
-        val definedBot = botStates.find{
-          item => item._2.name == senderName && item._2.threadType == thread
+        if(typeMessage == "ROOM"){
+          println("ROOM MODE")
+          val definedBot = botStates.find{
+            item => item._2.name == senderName && item._2.threadType == thread
+          }
+          definedBot match {
+            case Some(item) =>
+              implicit val materializer = ActorMaterializer()
+              implicit val asyncIOEc = DispatcherManager.asyncIOExecutionContext
+              implicit val system = ActorSystem()
+              val input = question.split(" ")
+
+              val obj = Json.obj(
+                "input" -> input(2),
+                "token" -> item._1
+              )
+              val entity = HttpEntity(ContentTypes.`application/json`, obj.toString())
+              val request = HttpRequest(
+                uri = chatbotUrl.getString("urlChat"),
+                entity = entity,
+                method = HttpMethods.POST)
+              Client()
+                .singleRequest(request)
+                .flatMap{ response =>
+                  val statusCode = response.status
+                  if (statusCode.isFailure()) {
+                    throw new Exception(statusCode.reason())
+                  } else
+                  {
+                    response
+                      .entity
+                      .dataBytes
+                      .runFold(ByteString(""))(_++_)
+                      .map(_.utf8String)
+                  }
+                }.onComplete{
+                case Success(item) =>
+                  val result = Json.parse(item)
+                  val output = (result \ "output").as[String]
+                  requester ! resultStates(output)
+                case Failure(reason) =>
+                  println(s"reason ${reason}")
+              }
+            case _ =>
+              requester ! resultStates("Kodenya dulu dong /care-chatbot mau tanya")
+          }
         }
-        definedBot match {
-          case Some(item) =>
+        else if(typeMessage == "DM"){
+          println("DM MODE")
+          println(s"DMSTATES : ${dmStates}")
+
+          if(dmStates.isDefinedAt(senderName)){
+            val dmState = dmStates(senderName)
             implicit val materializer = ActorMaterializer()
             implicit val asyncIOEc = DispatcherManager.asyncIOExecutionContext
             implicit val system = ActorSystem()
-            println(s"test : ${question.replace("/care-chatbot","")}")
+            val input = question.split(" ")
             val obj = Json.obj(
-              "input" -> question.replace("/care-chatbot",""),
-              "token" -> item._1
+              "input" -> input(2),
+              "token" -> dmState.threadType
             )
             val entity = HttpEntity(ContentTypes.`application/json`, obj.toString())
             val request = HttpRequest(
@@ -145,8 +237,10 @@ class KnowledgeProcessingActor extends Actor with ActorLogging{
               case Failure(reason) =>
                 println(s"reason ${reason}")
             }
-          case _ =>
+          }
+          else{
             requester ! resultStates("Kodenya dulu dong /care-chatbot mau tanya")
+          }
         }
       }
       else if(question.contains("/help")){
@@ -194,7 +288,8 @@ object KnowledgeProcessingActor {
   case class askKnowledge(
                          question : String,
                          thread : String,
-                         senderName : String
+                         senderName : String,
+                         typeMessage : String
                          )
   case class states(
                   state : String

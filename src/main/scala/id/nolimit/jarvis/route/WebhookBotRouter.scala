@@ -34,10 +34,11 @@ case class WebhookBotRouter()(implicit val context: ActorContext) {
             val message = (rawJson \ "message" \ "text").get.as[String].replace("@NoLimitJarvis", "")
             val sender = (rawJson \ "message" \ "sender" \ "displayName").get.as[String]
             val thread = (rawJson \ "message" \ "thread" \ "name").get.as[String]
+            val typeMessage = (rawJson \ "message" \ "space" \ "type" ).get.as[String]
 
             val knowledgeActor = context.actorSelection("/user/master/knowledge-actor")
             implicit val timeout = Timeout(3 minutes)
-            onComplete(knowledgeActor ? askKnowledge(message, thread, sender)){
+            onComplete(knowledgeActor ? askKnowledge(message, thread, sender, typeMessage)){
               case Success(item: resultStates) =>
                 println(
                   s"""
